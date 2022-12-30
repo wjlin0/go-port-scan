@@ -1,15 +1,17 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"golang.org/x/net/proxy"
+	"io"
 	"log"
 	"net"
-	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -28,41 +30,121 @@ var (
 	thread     = flag.Int("t", 20, "多少个端口同时扫描")
 	path       = flag.String("f", "./output", "输出路径")
 	outMethod  = flag.String("o", "", "输出模式csv,json")
+	timeout    = flag.Duration("time", 10*time.Second, "连接延迟")
 	//wg sync.WaitGroup
 )
 
-type Socks5Client struct {
-	proxyUrl *url.URL
-}
+func Client(n, p, a string, t time.Duration) error {
+	var err error
+	if strings.HasPrefix(p, "socks4://") {
+		err = errors.New("error socks协议")
+	} else if strings.HasPrefix(p, "socks5://") {
+		p = strings.Replace(p, "socks5://", "", -1)
+	} else if strings.HasPrefix(p, "socks://") {
+		p = strings.Replace(p, "socks://", "", -1)
+	} else {
+		err = errors.New("error socks协议")
+	}
+	if err != nil {
+		return err
+	}
 
-type DefaultClient struct {
-}
-
-func (d *DefaultClient) Dial(network string, address string) (conn net.Conn, err error) {
-	return net.DialTimeout(network, address, 10*time.Second)
-}
-func (s5 *Socks5Client) Dial(network string, address string) (net.Conn, error) {
-	d, err := proxy.SOCKS5(network, strings.Replace(s5.proxyUrl.String(), "socks5://", "", -1), nil, &net.Dialer{
-		Timeout: time.Second,
-	})
+	check, err := socks5(n, p, a, t)
+	if check == 1 {
+		return errors.New("代理设置失败请检查代理" + err.Error())
+	}
 
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return d.Dial(network, address)
+
+	return nil
 }
 
-func NewDial(proxyUrl string) (proxy.Dialer, error) {
-	parse, err := url.Parse(proxyUrl)
+func socks5(n, p, ap string, t time.Duration) (int, error) {
+	b := make([]byte, 256)
+	proxy_, err := net.DialTimeout(n, p, t)
 	if err != nil {
-		return nil, err
+		return 1, err
 	}
-	switch parse.Scheme {
-	case "socks5":
-		return &Socks5Client{parse}, nil
-	default:
-		return &DefaultClient{}, nil
+	defer proxy_.Close()
+
+	if ap == "" {
+		return 0, nil
 	}
+	addr, port_ := (strings.Split(ap, ":"))[0], (strings.Split(ap, ":"))[1]
+	//p1, _ := strconv.Atoi(port_)
+	p2, err := strconv.Atoi(port_)
+	if err != nil {
+		return 0, errors.New("error port: " + err.Error())
+	}
+	//p1, err := strconv.Atoi(port_)
+	//
+	if err != nil {
+		return 0, errors.New("error proxy: " + err.Error())
+	}
+	// 第一步，Client建立与Server之间的连接
+	err = proxy_.SetWriteDeadline(time.Now().Add(t))
+	if err != nil {
+		return 0, errors.New("error Timeout: " + err.Error())
+	}
+	_, err = proxy_.Write([]byte{0x05, 0x01, 0x00})
+	//fmt.Println([]byte{0x05, 0x01, 0x00})
+	if err != nil {
+		return 0, errors.New("error write: " + err.Error())
+	}
+	// 第二步，Server返回可以使用的方法
+	err = proxy_.SetReadDeadline(time.Now().Add(t))
+	if err != nil {
+		return 0, errors.New("error Timeout: " + err.Error())
+	}
+	_, err = io.ReadFull(proxy_, b[:2])
+	//fmt.Println(b[:2])
+	if err != nil {
+		return 0, errors.New("error read: " + err.Error())
+	}
+
+	version, method := b[0], b[1]
+	if version != 0x05 || method != 0x00 {
+		return 0, errors.New("error receive version/method: " + err.Error())
+	}
+	// 第三步，客户端告知目标地址
+	d1 := []byte{0x05, 0x01, 0x00}
+	matched, _ := regexp.MatchString("((2(5[0-5]|[0-4]\\d))|[0-1]?\\d{1,2})(\\.((2(5[0-5]|[0-4]\\d))|[0-1]?\\d{1,2})){3}", ap)
+	if matched {
+		d1 = append(d1, 0x01)
+	} else {
+		d1 = append(d1, 0x03)
+		d1 = append(d1, byte(len(addr)))
+	}
+	for _, i := range addr {
+		//fmt.Println(string(i))
+		d1 = append(d1, byte(i))
+	}
+	b1 := make([]byte, 2)
+	binary.BigEndian.PutUint16(b1, uint16(p2))
+	for _, i := range b1 {
+		d1 = append(d1, i)
+	}
+	err = proxy_.SetWriteDeadline(time.Now().Add(t))
+	if err != nil {
+		return 0, errors.New("error Timeout: " + err.Error())
+	}
+	_, err = proxy_.Write(d1)
+	if err != nil {
+		return 0, errors.New("error write:" + err.Error())
+	}
+	err = proxy_.SetReadDeadline(time.Now().Add(t))
+	if err != nil {
+		return 0, errors.New("error Timeout: " + err.Error())
+	}
+	_, err = io.ReadFull(proxy_, b[:2])
+	//fmt.Println(b[:2])
+	if err != nil {
+		return 0, errors.New("error read:" + err.Error())
+	}
+
+	return 0, nil
 }
 
 func Banner() {
@@ -111,16 +193,20 @@ func checkArg() (urls, ports []string) {
 	if !Exists(*path) {
 		err := os.MkdirAll(*path, os.ModePerm)
 		if err != nil {
-			fmt.Println("创建文件失败")
+			fmt.Println("error: 创建文件失败")
 			os.Exit(0)
 		}
 	}
+	if int(*timeout) < 5000000000 {
+		fmt.Println("error: 延迟时间时间不能小于5s")
+		os.Exit(0)
+	}
 	if urls[0] == "" {
-		flag.Usage()
+		fmt.Println("error: 不存在扫描对象")
 		os.Exit(0)
 	}
 	if ports[0] == "" {
-		flag.Usage()
+		fmt.Println("error: 不存在扫描端口")
 		os.Exit(0)
 	}
 	return
@@ -133,15 +219,20 @@ func main() {
 	urls, ports := checkArg()
 	ch := make(chan *GetInfo, *thread)
 	infoMap := make(map[string]map[string]bool)
-	d, err := NewDial(*socksProxy)
-	if err != nil {
-		panic(err)
+	//d, err := NewDial(*socksProxy)
+	if *socksProxy != "" {
+		err := Client("tcp", *socksProxy, "", 10*time.Second)
+		if err != nil {
+			fmt.Println("代理设置错误:", err.Error())
+			os.Exit(0)
+			return
+		}
 	}
 	for _, u := range urls {
 		t := make(map[string]bool)
 		for _, p := range ports {
 			//wg.Add(1)
-			go tcpGo(u, p, d, ch)
+			go tcpGo(u, p, ch)
 		}
 		//
 		for _, _ = range ports {
@@ -153,22 +244,33 @@ func main() {
 	Output(&infoMap)
 	//wg.Wait()
 }
-func tcpGo(url string, port string, d proxy.Dialer, ch chan *GetInfo) {
+func tcpGo(url string, port string, ch chan *GetInfo) {
 
 	info := &GetInfo{
 		Url:  url,
 		Port: port,
 		Code: false,
 	}
-
-	conn, err := d.Dial("tcp", url+":"+port)
-	if err != nil {
-		ch <- info
-	} else {
-		_ = conn.Close()
+	if *socksProxy != "" {
+		err := Client("tcp", *socksProxy, url+":"+port, *timeout)
+		if err != nil {
+			fmt.Println(err)
+			ch <- info
+			return
+		}
 		info.Code = true
 		ch <- info
+	} else {
+		conn, err := net.DialTimeout("tcp", url+":"+port, *timeout)
+		if err != nil {
+			ch <- info
+		} else {
+			_ = conn.Close()
+			info.Code = true
+			ch <- info
+		}
 	}
+
 	//wg.Done()
 }
 func Output(infos *map[string]map[string]bool) {
