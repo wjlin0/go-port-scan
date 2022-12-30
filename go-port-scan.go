@@ -51,7 +51,7 @@ func Client(n, p, a string, t time.Duration) error {
 
 	check, err := socks5(n, p, a, t)
 	if check == 1 {
-		return errors.New("代理设置失败请检查代理" + err.Error())
+		return errors.New("error 代理设置失败 " + err.Error())
 	}
 
 	if err != nil {
@@ -65,6 +65,7 @@ func socks5(n, p, ap string, t time.Duration) (int, error) {
 	b := make([]byte, 256)
 	proxy_, err := net.DialTimeout(n, p, t)
 	if err != nil {
+		//proxy_.Close()
 		return 1, err
 	}
 	defer proxy_.Close()
@@ -193,20 +194,20 @@ func checkArg() (urls, ports []string) {
 	if !Exists(*path) {
 		err := os.MkdirAll(*path, os.ModePerm)
 		if err != nil {
-			fmt.Println("error: 创建文件失败")
+			log.Println("error: 创建文件失败")
 			os.Exit(0)
 		}
 	}
 	if int(*timeout) < 5000000000 {
-		fmt.Println("error: 延迟时间时间不能小于5s")
+		log.Println("error: 延迟时间时间不能小于5s")
 		os.Exit(0)
 	}
 	if urls[0] == "" {
-		fmt.Println("error: 不存在扫描对象")
+		log.Println("error: 不存在扫描对象")
 		os.Exit(0)
 	}
 	if ports[0] == "" {
-		fmt.Println("error: 不存在扫描端口")
+		log.Println("error: 不存在扫描端口")
 		os.Exit(0)
 	}
 	return
@@ -223,7 +224,7 @@ func main() {
 	if *socksProxy != "" {
 		err := Client("tcp", *socksProxy, "", 10*time.Second)
 		if err != nil {
-			fmt.Println("代理设置错误:", err.Error())
+			log.Println(err.Error())
 			os.Exit(0)
 			return
 		}
@@ -254,7 +255,7 @@ func tcpGo(url string, port string, ch chan *GetInfo) {
 	if *socksProxy != "" {
 		err := Client("tcp", *socksProxy, url+":"+port, *timeout)
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 			ch <- info
 			return
 		}
