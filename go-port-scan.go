@@ -142,7 +142,7 @@ func socks5(n, p, ap string, t time.Duration) (int, error) {
 	_, err = io.ReadFull(proxy_, b[:2])
 	//fmt.Println(b[:2])
 	if err != nil {
-		return 0, errors.New("error read:" + err.Error())
+		return 0, errors.New("error read: " + err.Error())
 	}
 
 	return 0, nil
